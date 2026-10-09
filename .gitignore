@@ -1,0 +1,5 @@
+node_modules/
+dist/
+# Built from Qwen's proprietary bundle; never commit it
+*.asar
+install_result.txt
