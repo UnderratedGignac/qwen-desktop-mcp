@@ -5,6 +5,10 @@
 //  - changed/removed servers are closed (no leaked child processes)
 //  - tools/list cached per connection
 //  - dead servers reconnect automatically and the failed call is retried once
+//  - every tool result is size-capped before it reaches the model (see context-guard.js)
+//  - stdio servers start in the user's home folder, so relative paths resolve predictably
+const os = require("os");
+const { capToolResult } = require("../shared/context-guard.js");
 const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio.js");
 const { SSEClientTransport } = require("@modelcontextprotocol/sdk/client/sse.js");
@@ -23,8 +27,9 @@ const fingerprint = (c) =>
   JSON.stringify([c.transportType || "stdio", c.command, c.args || [], c.url || null, c.cwd || null]);
 
 class McpManager {
-  constructor({ log = console.log } = {}) {
+  constructor({ log = console.log, maxResultChars } = {}) {
     this.log = log;
+    this.maxResultChars = maxResultChars;
     this.configs = {};
     this.entries = {}; // name -> { fp, client, connecting, tools }
   }
@@ -61,17 +66,17 @@ class McpManager {
         resetTimeoutOnProgress: true,
       });
     };
+    let result;
     try {
-      return await call();
+      result = await call();
     } catch (e) {
       const entry = this.entries[serverName];
       // Only retry when the connection itself is gone; tool errors are returned as-is.
-      if (entry && !entry.client) {
-        this.log(`[mcp] ${serverName} connection lost, reconnecting and retrying ${toolName}`);
-        return call();
-      }
-      throw e;
+      if (!entry || entry.client) throw e;
+      this.log(`[mcp] ${serverName} connection lost, reconnecting and retrying ${toolName}`);
+      result = await call();
     }
+    return capToolResult(result, this.maxResultChars);
   }
 
   async prewarm() {
@@ -110,7 +115,7 @@ class McpManager {
     let transport;
     if (config.transportType === "httpStream") transport = new StreamableHTTPClientTransport(new URL(config.url));
     else if (config.transportType === "sse") transport = new SSEClientTransport(new URL(config.url));
-    else transport = new StdioClientTransport({ ...config, stderr: "ignore" });
+    else transport = new StdioClientTransport({ cwd: os.homedir(), ...config, stderr: "ignore" });
     client.onclose = () => {
       if (entry.client === client) {
         entry.client = null;

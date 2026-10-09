@@ -71,6 +71,13 @@ const pidOf = async (m) => {
     const r = await manager.callTool({ serverName: 'T', toolName: 'run_command', toolArguments: { command: 'Write-Output back' } });
     assert.match(r.content[0].text, /back/);
   });
+  await check('tool results are capped before they reach the model', async () => {
+    if (target === 'spark') throw new Error('stock proxy has no result cap');
+    const r = await manager.callTool({ serverName: 'T', toolName: 'run_command', toolArguments: { command: "1..20000 | ForEach-Object { 'row' + $_ }" } });
+    const t = r.content[0].text;
+    assert.ok(t.length <= 21000, `length ${t.length}`);
+    assert.match(t, /row20000/);
+  });
   await check('removing a server closes its process', async () => {
     await manager.setMCPServers({});
     await new Promise((r) => setTimeout(r, 800));

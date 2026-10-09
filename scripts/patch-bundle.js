@@ -99,6 +99,8 @@ const mcpClientUpdateConfig = async (_, config) => {
 };`],
 ]);
 fs.copyFileSync(path.join(repo, 'src/main/mcp-manager.js'), path.join(dir, 'out/main/mcp-manager.js'));
+fs.mkdirSync(path.join(dir, 'out/shared'), { recursive: true });
+fs.copyFileSync(path.join(repo, 'src/shared/context-guard.js'), path.join(dir, 'out/shared/context-guard.js'));
 
 // ---- preload -------------------------------------------------------------------------------
 const preload = path.join(dir, 'out/preload/index.js');
@@ -108,7 +110,8 @@ fs.appendFileSync(preload, `
 ${marker} (see mcp-always-on.js). Only for the Qwen chat web app, never the shell page.
 if (window.location.protocol === "https:" && /(^|\\.)qwen\\.ai$/.test(window.location.hostname)) {
   try {
-    const script = require("fs").readFileSync(path.join(__dirname, "mcp-always-on.js"), "utf8");
+    const read = (p) => require("fs").readFileSync(path.join(__dirname, p), "utf8");
+    const script = read("../shared/context-guard.js") + "\\n;\\n" + read("mcp-always-on.js");
     electron.webFrame.executeJavaScript(script).catch((e) => console.error("[mcp-always-on]", e));
   } catch (e) {
     console.error("[mcp-always-on] failed to load:", e);
