@@ -171,6 +171,37 @@ check('buildHandover includes the original request when it exists', () => {
   assert.match(G.buildHandover(c), /Make the free kick curve more realistic/);
 });
 
+// ---- auto-compact --------------------------------------------------------------------------
+check('buildHandover embeds the model summary and a hop marker', () => {
+  const h = G.buildHandover(brokenChat, { summary: 'Done: physics. Left: spin tests.', hop: 2 });
+  assert.match(h, /Done: physics\. Left: spin tests\./);
+  assert.strictEqual(G.parseHop(h), 2);
+});
+check('parseHop is 0 for ordinary user messages', () => {
+  assert.strictEqual(G.parseHop('make the fish faster'), 0);
+  assert.strictEqual(G.parseHop(''), 0);
+  assert.strictEqual(G.parseHop(null), 0);
+});
+check('shouldAutoCompact fires on stop, context errors and internal errors after tools ran', () => {
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'stop', hop: 0 }), true);
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'context', hop: 0 }), true);
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'broken', hop: 0 }), true);
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'internal', hop: 0, toolsRan: 3 }), true);
+});
+check('shouldAutoCompact does not fire for internal errors before any tool ran, or for stuck/warn', () => {
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'internal', hop: 0, toolsRan: 0 }), false);
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'stuck', hop: 0 }), false);
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'warn', hop: 0 }), false);
+});
+check('shouldAutoCompact stops after the hop limit so it can never loop forever', () => {
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'stop', hop: 2 }), true);
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'stop', hop: 3 }), false);
+  assert.strictEqual(G.shouldAutoCompact({ kind: 'stop', hop: 1 }, { maxHops: 1 }), false);
+});
+check('classifyCompletionError recognises internal_error', () => {
+  assert.strictEqual(G.classifyCompletionError('{"error":{"code":"internal_error","details":"An unexpected error occurred."}}'), 'internal');
+});
+
 for (const r of results) console.log(r.join(' | '));
 const failed = results.filter((r) => r[0] === 'FAIL').length;
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED');

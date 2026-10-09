@@ -138,48 +138,91 @@
     return !!(r && r.success);
   }
 
-  function watchStream(res, chatId) {
+  function watchStream(res, chatId, opts = {}) {
     if (!res.body || !guard) return;
     const reader = res.clone().body.getReader();
     const dec = new TextDecoder();
     let carry = "";
+    let buf = ""; // unparsed SSE remainder, only kept when the answer is wanted
+    let answer = "";
     (async () => {
       for (;;) {
         const { done, value } = await reader.read();
-        if (done) return;
-        const text = carry + dec.decode(value, { stream: true });
+        if (done) break;
+        const chunk = dec.decode(value, { stream: true });
+        const text = carry + chunk;
         const kind = guard.classifyCompletionError(text);
         if (kind) {
           reader.cancel().catch(() => {});
-          if (kind === "context") return showBanner("broken", chatId);
           const id = chatId || chatIdFromUrl();
-          const released = id ? await releaseChat(id).catch(() => false) : false;
-          return showBanner(released ? "released" : "stuck", id);
+          if (kind === "stuck") {
+            const released = id ? await releaseChat(id).catch(() => false) : false;
+            return showBanner(released ? "released" : "stuck", id);
+          }
+          return onTurnFailed(id, kind === "context" ? "context" : "internal");
         }
         carry = text.slice(-300);
+        if (opts.collectAnswer) {
+          buf += chunk;
+          const lines = buf.split("\n");
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith("data:")) continue;
+            try {
+              const d = JSON.parse(line.slice(5)).choices[0].delta;
+              if (d && d.phase === "answer" && typeof d.content === "string") answer += d.content;
+            } catch (_) {}
+          }
+        }
       }
+      if (opts.onDone) opts.onDone(answer);
     })().catch(() => {});
+  }
+
+  // Per chat: how many tool results went back this turn, and which auto-continue hop we're on.
+  const turnInfo = {};
+  const infoFor = (id) => (turnInfo[id] = turnInfo[id] || { toolsRan: 0, hop: 0 });
+
+  function onTurnFailed(chatId, kind) {
+    const info = infoFor(chatId);
+    const event = { kind, hop: info.hop, toolsRan: info.toolsRan };
+    if (guard.shouldAutoCompact(event)) return autoCompact(chatId, null, info.hop);
+    showBanner(kind === "internal" ? "internal" : "broken", chatId);
   }
 
   const origFetch = window.fetch;
   window.fetch = async function (input, init) {
     const url = typeof input === "string" ? input : (input && input.url) || "";
     let chatId = null;
+    let streamOpts = {};
     try {
       if (url.includes(COMPLETIONS) && init && typeof init.body === "string") {
         const body = JSON.parse(init.body);
         chatId = body.chat_id || chatIdFromUrl();
         let changed = false;
-        if (Array.isArray(body.messages) && body.messages.some((m) => m && m.role === "user")) {
+        const msgs = Array.isArray(body.messages) ? body.messages : [];
+        const userMsg = msgs.find((m) => m && m.role === "user");
+        if (userMsg) {
           const map = await syncServers().catch(() => ({}));
           changed = injectTools(body, map);
+          if (guard) turnInfo[chatId] = { toolsRan: 0, hop: guard.parseHop(String(userMsg.content || "")) };
+        } else if (msgs.some((m) => m && m.role === "function")) {
+          infoFor(chatId).toolsRan++;
         }
         if (guard) {
           const g = guard.guardRequest(body, guardState, userLimits());
           changed = changed || g.changed;
           saveChats();
-          if (g.level === "stop") showBanner("stop", chatId);
-          else if (g.level === "warn") showBanner("warn", chatId, g.used / g.hard);
+          if (g.level === "stop") {
+            // This reply is the model's handover summary; continue in a new chat once it's written.
+            const hop = infoFor(chatId).hop;
+            const auto = guard.shouldAutoCompact({ kind: "stop", hop });
+            showBanner("stop", chatId, auto);
+            if (auto) {
+              const id = chatId;
+              streamOpts = { collectAnswer: true, onDone: (summary) => autoCompact(id, summary, hop) };
+            }
+          } else if (g.level === "warn") showBanner("warn", chatId, g.used / g.hard);
           else if (g.chatUsed > CHAT_SOFT) showBanner("long", chatId, g.chatUsed);
         }
         if (changed) init = { ...init, body: JSON.stringify(body) };
@@ -189,7 +232,7 @@
     }
     const res = await origFetch.call(this, input, init);
     try {
-      if (url.includes(COMPLETIONS)) watchStream(res, chatId);
+      if (url.includes(COMPLETIONS)) watchStream(res, chatId, streamOpts);
     } catch (_) {}
     return res;
   };
@@ -216,12 +259,18 @@
   const HANDOVER_KEY = "qwenContextGuard.handover";
   const MESSAGES = {
     warn: (p) => `Context ${Math.round(p * 100)}% used in this task. Qwen has been asked to wrap up.`,
-    stop: () => "Context budget reached. Qwen is writing a handover summary; continue in a new chat.",
+    stop: (auto) =>
+      auto
+        ? "Context budget reached. Qwen is writing a handover summary; the work will continue in a new chat automatically."
+        : "Context budget reached. Qwen is writing a handover summary; continue in a new chat.",
     long: (n) => `This chat has ${Math.round(n / 1000)} KB of tool output. A new chat will be faster and safer.`,
     broken: () => "This chat lost its first message and can't continue. Your file changes are safe on disk.",
     released: () => "An earlier step in this chat was still open on Qwen's server (Qwen was probably closed mid-task). It's been released: send your message again.",
     stuck: () => "Qwen's server still thinks an earlier step in this chat is running. Wait a minute and send again, or continue in a new chat.",
+    internal: () => "Qwen's server failed mid-task (internal error). Your file changes are safe on disk.",
+    continued: (h) => `Continued automatically from "${h.from.title}" (step ${h.hop}/${guard.MAX_HOPS}).`,
   };
+  const BUTTONS = { continued: "Open previous chat" };
   let banner = null;
   let bannerChat = null;
   let dismissed = new Set();
@@ -240,8 +289,8 @@
       css.textContent =
         "#qwen-context-guard{position:fixed;right:16px;bottom:96px;z-index:2147483000;max-width:min(440px,calc(100vw - 32px));display:flex;gap:10px;align-items:center;padding:10px 12px;border-radius:12px;font:13px/1.4 system-ui,sans-serif;background:#1f2328;color:#f0f3f6;box-shadow:0 6px 24px rgba(0,0,0,.25)}" +
         "#qwen-context-guard[data-kind=warn],#qwen-context-guard[data-kind=stuck]{border-left:4px solid #d4a72c}" +
-        "#qwen-context-guard[data-kind=long],#qwen-context-guard[data-kind=released]{border-left:4px solid #4493f8}" +
-        "#qwen-context-guard[data-kind=stop],#qwen-context-guard[data-kind=broken]{border-left:4px solid #f85149}" +
+        "#qwen-context-guard[data-kind=long],#qwen-context-guard[data-kind=released],#qwen-context-guard[data-kind=continued]{border-left:4px solid #4493f8}" +
+        "#qwen-context-guard[data-kind=stop],#qwen-context-guard[data-kind=broken],#qwen-context-guard[data-kind=internal]{border-left:4px solid #f85149}" +
         "#qwen-context-guard .qcg-go{flex:none;border:0;border-radius:8px;padding:6px 10px;background:#f0f3f6;color:#1f2328;font-weight:600;cursor:pointer}" +
         "#qwen-context-guard .qcg-x{flex:none;border:0;background:none;color:inherit;font-size:18px;cursor:pointer;opacity:.7}";
       document.head.appendChild(css);
@@ -249,32 +298,45 @@
         dismissed.add(banner.dataset.key);
         banner.remove();
       };
-      banner.querySelector(".qcg-go").onclick = () => continueInNewChat(bannerChat);
+      banner.querySelector(".qcg-go").onclick = () => {
+        if (banner.dataset.kind === "continued" && continuedFrom) location.assign(`/c/${continuedFrom.id}`);
+        else continueInNewChat(bannerChat);
+      };
     }
     banner.dataset.kind = kind;
     banner.dataset.key = key;
     banner.querySelector(".qcg-text").textContent = MESSAGES[kind](value);
+    banner.querySelector(".qcg-go").textContent = BUTTONS[kind] || "Continue in new chat";
     if (!banner.isConnected) document.body.appendChild(banner);
   }
 
-  async function continueInNewChat(chatId) {
+  // Builds the handover from the chat's stored data and opens a new chat with it. With auto=true
+  // the new chat sends it by itself (auto-compact); otherwise it waits in the input box.
+  async function startHandover(chatId, { summary = null, hop = 0, auto = false } = {}) {
     const go = banner && banner.querySelector(".qcg-go");
     if (go) go.textContent = "Preparing handover…";
     try {
       const id = chatId || chatIdFromUrl();
       const j = await origFetch(`/api/v2/chats/${id}`).then((r) => r.json());
-      sessionStorage.setItem(HANDOVER_KEY, guard.buildHandover(j));
+      const text = guard.buildHandover(j, { summary, hop: auto ? hop + 1 : 0 });
+      const title = (j.data && j.data.title) || "previous chat";
+      sessionStorage.setItem(HANDOVER_KEY, JSON.stringify({ text, auto, from: { id, title }, hop: hop + 1 }));
       location.assign("/");
     } catch (e) {
       if (go) go.textContent = "Couldn't build handover";
       console.warn("[context-guard] handover failed:", e);
     }
   }
+  const continueInNewChat = (chatId) => startHandover(chatId);
+  const autoCompact = (chatId, summary, hop) => startHandover(chatId, { summary, hop, auto: true });
 
-  // On the new chat page, drop the handover into the input box for the user to review and send.
+  // On the new chat page: put the handover in the input box, and send it if this is auto-compact.
   function fillHandover() {
-    const text = sessionStorage.getItem(HANDOVER_KEY);
-    if (!text) return;
+    let h;
+    try {
+      h = JSON.parse(sessionStorage.getItem(HANDOVER_KEY) || "null");
+    } catch (_) {}
+    if (!h || !h.text) return;
     let tries = 0;
     const timer = setInterval(() => {
       const ta = document.querySelector("textarea");
@@ -282,17 +344,29 @@
       clearInterval(timer);
       if (!ta) return;
       sessionStorage.removeItem(HANDOVER_KEY);
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, text);
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, h.text);
       ta.dispatchEvent(new Event("input", { bubbles: true }));
       ta.focus();
+      if (!h.auto) return;
+      setTimeout(() => {
+        ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+        continuedFrom = h.from;
+        showBanner("continued", null, h);
+      }, 700);
     }, 250);
   }
+  let continuedFrom = null;
 
   // Reset per-chat banners when the user moves to another chat.
   let lastPath = location.pathname;
   setInterval(() => {
     if (location.pathname === lastPath) return;
     lastPath = location.pathname;
+    // The new chat gets its /c/<id> URL right after the handover is sent; keep that banner.
+    if (banner && banner.dataset.kind === "continued" && !banner.dataset.moved) {
+      banner.dataset.moved = "1";
+      return;
+    }
     if (banner) banner.remove();
   }, 1000);
 

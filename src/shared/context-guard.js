@@ -125,6 +125,7 @@
   // Matched only inside error-ish JSON fields, so model output that merely mentions them is ignored.
   const ERROR_FIELD = (pattern) => new RegExp(`"(?:message|msg|error|code|details)"\\s*:\\s*"[^"]*(?:${pattern})`, "i");
   const STUCK_ERROR = ERROR_FIELD("the chat is in progress");
+  const INTERNAL_ERROR = ERROR_FIELD("internal_error");
   const CONTEXT_ERROR = ERROR_FIELD(
     "first message must not|context length|maximum context|too many tokens|input is too long|exceed[^\"]*(?:token|length|limit)"
   );
@@ -135,7 +136,27 @@
     if (typeof text !== "string" || !text) return null;
     if (STUCK_ERROR.test(text)) return "stuck";
     if (CONTEXT_ERROR.test(text)) return "context";
+    if (INTERNAL_ERROR.test(text)) return "internal";
     return null;
+  }
+
+  // ---- auto-compact ------------------------------------------------------------------------
+  const MAX_HOPS = 3;
+  const HOP_MARK = (hop, max) => `[auto-continue ${hop}/${max}]`;
+  function parseHop(text) {
+    const m = typeof text === "string" && text.match(/\[auto-continue (\d+)\/\d+\]/);
+    return m ? Number(m[1]) : 0;
+  }
+
+  // event: { kind: "stop" | "context" | "broken" | "internal" | ..., hop, toolsRan }
+  // An internal error before any tool ran is just a failed reply (resending is safe); after tools ran,
+  // resending would redo their side effects, so the work moves to a new chat instead.
+  function shouldAutoCompact(event, opts = {}) {
+    const maxHops = opts.maxHops != null ? opts.maxHops : MAX_HOPS;
+    if (!event || (event.hop || 0) >= maxHops) return false;
+    if (event.kind === "stop" || event.kind === "context" || event.kind === "broken") return true;
+    if (event.kind === "internal") return (event.toolsRan || 0) > 0;
+    return false;
   }
 
   // ---- broken-chat detection and handover --------------------------------------------------
@@ -168,7 +189,7 @@
     return common.length >= 2 ? common.join("\\") : "";
   }
 
-  function buildHandover(chatJson) {
+  function buildHandover(chatJson, opts = {}) {
     const { title, list } = messagesOf(chatJson);
     const user = list.filter((m) => m && m.role === "user");
     const assistants = list.filter((m) => m && m.role === "assistant");
@@ -211,16 +232,32 @@
     if (changed.size) lines.push("", "Files already changed (the changes are on disk):", ...[...changed].slice(-25).map((f) => `- ${f}`));
     if (touched.size) lines.push("", "Files used by terminal commands (may also have been changed):", ...[...touched].slice(-15).map((f) => `- ${f}`));
     if (commands.length) lines.push("", "Last commands run:", ...commands.slice(-8).map((c) => `- ${c}`));
-    const progress = lastAnswer || lastThought;
-    if (progress) lines.push("", "Latest progress note:", clip(progress, 1200));
+    if (opts.summary) lines.push("", "Handover summary written by the previous chat:", clip(String(opts.summary), 2500));
+    else {
+      const progress = lastAnswer || lastThought;
+      if (progress) lines.push("", "Latest progress note:", clip(progress, 1200));
+    }
     lines.push(
       "",
       "Please: 1) check the current state first (git status / git diff --stat in the project folder, or read only the changed files above), " +
         "2) tell me in 3-5 bullets where things stand, 3) continue the remaining work. " +
         "Read files in small ranges and keep tool output short."
     );
+    if (opts.hop) lines.push("", HOP_MARK(opts.hop, opts.maxHops || MAX_HOPS));
     return lines.join("\n");
   }
 
-  return { DEFAULTS, capText, capToolResult, newState, guardRequest, classifyCompletionError, isBrokenChat, buildHandover };
+  return {
+    DEFAULTS,
+    MAX_HOPS,
+    capText,
+    capToolResult,
+    newState,
+    guardRequest,
+    classifyCompletionError,
+    parseHop,
+    shouldAutoCompact,
+    isBrokenChat,
+    buildHandover,
+  };
 });
