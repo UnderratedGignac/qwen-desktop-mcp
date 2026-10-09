@@ -121,6 +121,23 @@
     return res;
   }
 
+  // ---- completion errors -------------------------------------------------------------------
+  // Matched only inside error-ish JSON fields, so model output that merely mentions them is ignored.
+  const ERROR_FIELD = (pattern) => new RegExp(`"(?:message|msg|error|code|details)"\\s*:\\s*"[^"]*(?:${pattern})`, "i");
+  const STUCK_ERROR = ERROR_FIELD("the chat is in progress");
+  const CONTEXT_ERROR = ERROR_FIELD(
+    "first message must not|context length|maximum context|too many tokens|input is too long|exceed[^\"]*(?:token|length|limit)"
+  );
+
+  // "stuck": the server still thinks an earlier generation in this chat is running (typically the
+  // app was closed mid tool-loop). "context": the conversation no longer fits / lost its start.
+  function classifyCompletionError(text) {
+    if (typeof text !== "string" || !text) return null;
+    if (STUCK_ERROR.test(text)) return "stuck";
+    if (CONTEXT_ERROR.test(text)) return "context";
+    return null;
+  }
+
   // ---- broken-chat detection and handover --------------------------------------------------
   const messagesOf = (chatJson) => {
     const d = (chatJson && chatJson.data) || chatJson || {};
@@ -205,5 +222,5 @@
     return lines.join("\n");
   }
 
-  return { DEFAULTS, capText, capToolResult, newState, guardRequest, isBrokenChat, buildHandover };
+  return { DEFAULTS, capText, capToolResult, newState, guardRequest, classifyCompletionError, isBrokenChat, buildHandover };
 });

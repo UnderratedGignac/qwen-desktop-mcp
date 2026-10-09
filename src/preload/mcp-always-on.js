@@ -123,8 +123,20 @@
     }
   };
   const chatIdFromUrl = () => (location.pathname.match(/\/c\/([0-9a-f-]{36})/) || [])[1] || null;
-  // Errors Qwen returns when the conversation no longer fits / lost its first message.
-  const CONTEXT_ERROR = /"(?:message|msg|error|code|details)"\s*:\s*"[^"]*(first message must not|context length|maximum context|too many tokens|input is too long|exceed[^"]*(?:token|length|limit))/i;
+  // "The chat is in progress!" means the server still has an earlier generation open for this chat,
+  // typically because Qwen was closed mid tool-loop. Do what the Stop button does to release it.
+  async function releaseChat(chatId) {
+    const j = await origFetch(`/api/v2/chats/${chatId}`).then((r) => r.json());
+    const h = j.data.chat.history;
+    const last = Object.values(h.messages).filter((m) => m && m.role === "assistant").pop();
+    if (!last) return false;
+    const r = await origFetch(`/api/v2/chat/completions/stop?chat_id=${chatId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Accel-Buffering": "no" },
+      body: JSON.stringify({ chat_id: chatId, response_id: last.id }),
+    }).then((x) => x.json());
+    return !!(r && r.success);
+  }
 
   function watchStream(res, chatId) {
     if (!res.body || !guard) return;
@@ -136,9 +148,13 @@
         const { done, value } = await reader.read();
         if (done) return;
         const text = carry + dec.decode(value, { stream: true });
-        if (CONTEXT_ERROR.test(text)) {
+        const kind = guard.classifyCompletionError(text);
+        if (kind) {
           reader.cancel().catch(() => {});
-          return showBanner("broken", chatId);
+          if (kind === "context") return showBanner("broken", chatId);
+          const id = chatId || chatIdFromUrl();
+          const released = id ? await releaseChat(id).catch(() => false) : false;
+          return showBanner(released ? "released" : "stuck", id);
         }
         carry = text.slice(-300);
       }
@@ -203,6 +219,8 @@
     stop: () => "Context budget reached. Qwen is writing a handover summary; continue in a new chat.",
     long: (n) => `This chat has ${Math.round(n / 1000)} KB of tool output. A new chat will be faster and safer.`,
     broken: () => "This chat lost its first message and can't continue. Your file changes are safe on disk.",
+    released: () => "An earlier step in this chat was still open on Qwen's server (Qwen was probably closed mid-task). It's been released: send your message again.",
+    stuck: () => "Qwen's server still thinks an earlier step in this chat is running. Wait a minute and send again, or continue in a new chat.",
   };
   let banner = null;
   let bannerChat = null;
@@ -221,7 +239,8 @@
       const css = document.createElement("style");
       css.textContent =
         "#qwen-context-guard{position:fixed;right:16px;bottom:96px;z-index:2147483000;max-width:min(440px,calc(100vw - 32px));display:flex;gap:10px;align-items:center;padding:10px 12px;border-radius:12px;font:13px/1.4 system-ui,sans-serif;background:#1f2328;color:#f0f3f6;box-shadow:0 6px 24px rgba(0,0,0,.25)}" +
-        "#qwen-context-guard[data-kind=warn]{border-left:4px solid #d4a72c}#qwen-context-guard[data-kind=long]{border-left:4px solid #4493f8}" +
+        "#qwen-context-guard[data-kind=warn],#qwen-context-guard[data-kind=stuck]{border-left:4px solid #d4a72c}" +
+        "#qwen-context-guard[data-kind=long],#qwen-context-guard[data-kind=released]{border-left:4px solid #4493f8}" +
         "#qwen-context-guard[data-kind=stop],#qwen-context-guard[data-kind=broken]{border-left:4px solid #f85149}" +
         "#qwen-context-guard .qcg-go{flex:none;border:0;border-radius:8px;padding:6px 10px;background:#f0f3f6;color:#1f2328;font-weight:600;cursor:pointer}" +
         "#qwen-context-guard .qcg-x{flex:none;border:0;background:none;color:inherit;font-size:18px;cursor:pointer;opacity:.7}";

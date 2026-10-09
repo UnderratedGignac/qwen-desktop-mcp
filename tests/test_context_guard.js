@@ -106,6 +106,14 @@ check('malformed or unrelated bodies are ignored safely', () => {
   assert.strictEqual(G.guardRequest({ chat_id: 'x', messages: [{ role: 'function', content: 'plain' }] }, st, limits).changed, false);
 });
 
+check('classifyCompletionError recognises stuck and context errors only in error fields', () => {
+  assert.strictEqual(G.classifyCompletionError('{"success":false,"data":{"code":"Bad_Request","details":"The chat is in progress!"}}'), 'stuck');
+  assert.strictEqual(G.classifyCompletionError('data: {"error":{"code":"Bad_Request","message":"The chat is in progress!"}}'), 'stuck');
+  assert.strictEqual(G.classifyCompletionError('{"code":"invalid_parameter","message":"Invalid input, the first message must not assistant message."}'), 'context');
+  assert.strictEqual(G.classifyCompletionError('data: {"choices":[{"delta":{"content":"the chat is in progress! and the first message must not assistant message"}}]}'), null);
+  assert.strictEqual(G.classifyCompletionError(''), null);
+});
+
 // Shaped like GET /api/v2/chats/{id} for a chat whose user message was lost.
 const brokenChat = {
   data: {
