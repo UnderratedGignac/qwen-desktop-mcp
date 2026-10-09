@@ -95,3 +95,20 @@ any command as you, **without asking**. Text the model reads (web pages, files, 
 to steer it into doing that (prompt injection). Keep that in mind before asking it to process untrusted
 content. Run `restore_qwen.bat`, or remove the Terminal entry in `scripts/patch-bundle.js`, if you want
 that capability gone.
+
+## Multiple accounts
+
+Run several Qwen accounts side by side, each with its own login:
+
+```powershell
+powershell -File scripts\qwen-accounts.ps1                      # Account 1..3
+powershell -File scripts\qwen-accounts.ps1 -Names Work,Personal  # your own names
+powershell -File scripts\qwen-accounts.ps1 -Remove               # remove shortcuts (logins kept)
+```
+
+- Account 1 is your existing Qwen profile.
+- Every other account gets its own folder under `%APPDATA%\Qwen-profiles`. Open it once from its
+  shortcut (Start menu → **Qwen Accounts**, or the Desktop) and log in; after that it stays logged in.
+- Each window shows its account name in the title bar, and each account runs its own MCP servers.
+
+Using extra accounts to get around per-account usage limits may break Qwen's terms of service.

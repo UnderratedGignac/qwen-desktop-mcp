@@ -97,8 +97,22 @@ const mcpClientUpdateConfig = async (_, config) => {
   await applyMcpConfig(config);
   return mcpClientGetConfig();
 };`],
+  // Multiple accounts: show the profile name in the window title (see src/main/profile.js).
+  [`electron.app.on("will-quit", () => mcpServer.closeAll());`, `electron.app.on("will-quit", () => mcpServer.closeAll());
+const { profileName, windowTitle } = require("./profile.js");
+const qwenProfile = profileName(process.argv, electron.app.getPath("userData"));
+if (qwenProfile) {
+  electron.app.on("browser-window-created", (_, win) => {
+    win.setTitle(windowTitle(win.getTitle() || "Qwen", qwenProfile));
+    win.on("page-title-updated", (e, title) => {
+      e.preventDefault();
+      win.setTitle(windowTitle(title || "Qwen", qwenProfile));
+    });
+  });
+}`],
 ]);
 fs.copyFileSync(path.join(repo, 'src/main/mcp-manager.js'), path.join(dir, 'out/main/mcp-manager.js'));
+fs.copyFileSync(path.join(repo, 'src/main/profile.js'), path.join(dir, 'out/main/profile.js'));
 fs.mkdirSync(path.join(dir, 'out/shared'), { recursive: true });
 fs.copyFileSync(path.join(repo, 'src/shared/context-guard.js'), path.join(dir, 'out/shared/context-guard.js'));
 
