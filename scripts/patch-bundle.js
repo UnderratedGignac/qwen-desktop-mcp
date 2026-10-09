@@ -46,20 +46,17 @@ function adaptConfig(configs) {`],
   // Replace the spark-mcp proxy with the persistent manager; Filesystem + Terminal always present.
   [`const mcpServer = new sparkMcp.Proxy();`, `const { McpManager } = require("./mcp-manager.js");
 const mcpServer = new McpManager();
-const QWEN_MCP_DIR = path.join(os.homedir(), ".qwen-mcp");
-const MANAGED_MCP_SERVERS = {
-  Filesystem: { name: "Filesystem", command: "node", args: [path.join(QWEN_MCP_DIR, "mcp_filesystem_server.js"), os.homedir(), "C:\\\\"], transportType: "stdio" },
-  Terminal: { name: "Terminal", command: "node", args: [path.join(QWEN_MCP_DIR, "mcp_terminal_server.js")], transportType: "stdio" }
-};
-let rawMcpConfig = {};
+const extras = require("./extras.js");
+// Built-in servers (Filesystem, Terminal, Memory, Skills) and registry servers come from extras.js and
+// always win over user-added ones. Only the user-added servers are persisted. The page never sees env.
+let userMcpConfig = {};
+let pageMcpConfig = {};
 const applyMcpConfig = async (incoming) => {
-  const strip = (cfg) => Object.fromEntries(Object.entries(cfg || {}).map(([k, v]) => {
-    const { env, ...rest } = v || {};
-    return [k, rest];
-  }));
-  rawMcpConfig = { ...strip(rawMcpConfig), ...strip(incoming), ...MANAGED_MCP_SERVERS };
-  await mcpServer.setMCPServers(adaptConfig(JSON.parse(JSON.stringify(rawMcpConfig))));
-  settings.set("mcp_config", rawMcpConfig);
+  const merged = extras.mergeConfigs({ ...userMcpConfig, ...(incoming || {}) }, extras.managedServers());
+  userMcpConfig = merged.persisted;
+  pageMcpConfig = merged.page;
+  await mcpServer.setMCPServers(adaptConfig(JSON.parse(JSON.stringify(merged.process))));
+  settings.set("mcp_config", userMcpConfig);
 };
 (async () => {
   let saved = {};
@@ -91,7 +88,7 @@ const mcpClientUpdateConfig = async (_, config) => {
   }
 };`, `const mcpClientToolList = async (_, serverName) => mcpServer.listTools({ serverName });
 // Never hand environment variables (API keys etc.) to the web page.
-const mcpClientGetConfig = async () => rawMcpConfig;
+const mcpClientGetConfig = async () => pageMcpConfig;
 const mcpClientToolCall = async (_, params) => mcpServer.callTool(params);
 const mcpClientUpdateConfig = async (_, config) => {
   await applyMcpConfig(config);
@@ -101,6 +98,7 @@ const mcpClientUpdateConfig = async (_, config) => {
   [`electron.app.on("will-quit", () => mcpServer.closeAll());`, `electron.app.on("will-quit", () => mcpServer.closeAll());
 const { profileName, windowTitle } = require("./profile.js");
 const qwenProfile = profileName(process.argv, electron.app.getPath("userData"));
+extras.setup({ electron, app: electron.app, apply: applyMcpConfig, profile: qwenProfile });
 if (qwenProfile) {
   electron.app.on("browser-window-created", (_, win) => {
     win.setTitle(windowTitle(win.getTitle() || "Qwen", qwenProfile));
@@ -112,7 +110,9 @@ if (qwenProfile) {
 }`],
 ]);
 fs.copyFileSync(path.join(repo, 'src/main/mcp-manager.js'), path.join(dir, 'out/main/mcp-manager.js'));
-fs.copyFileSync(path.join(repo, 'src/main/profile.js'), path.join(dir, 'out/main/profile.js'));
+for (const f of ['profile', 'extras', 'registry', 'hooks']) {
+  fs.copyFileSync(path.join(repo, `src/main/${f}.js`), path.join(dir, `out/main/${f}.js`));
+}
 fs.mkdirSync(path.join(dir, 'out/shared'), { recursive: true });
 fs.copyFileSync(path.join(repo, 'src/shared/context-guard.js'), path.join(dir, 'out/shared/context-guard.js'));
 
@@ -121,7 +121,18 @@ const preload = path.join(dir, 'out/preload/index.js');
 const marker = '// Local MCP always on';
 if (fs.readFileSync(preload, 'utf8').includes(marker)) throw new Error('preload already patched; start from the stock bundle');
 fs.appendFileSync(preload, `
-${marker} (see mcp-always-on.js). Only for the Qwen chat web app, never the shell page.
+${marker}: small bridge for the chat page (managed server names, hook events)
+{
+  const qwenExtras = {
+    managed: () => electron.ipcRenderer.invoke("qwen_extras_managed"),
+    hook: (e) => electron.ipcRenderer.send("qwen_hook", e)
+  };
+  try {
+    if (process.contextIsolated) electron.contextBridge.exposeInMainWorld("qwenExtras", qwenExtras);
+    else window.qwenExtras = qwenExtras;
+  } catch (e) { console.error(e); }
+}
+// (see mcp-always-on.js) Only for the Qwen chat web app, never the shell page.
 if (window.location.protocol === "https:" && /(^|\\.)qwen\\.ai$/.test(window.location.hostname)) {
   try {
     const read = (p) => require("fs").readFileSync(path.join(__dirname, p), "utf8");

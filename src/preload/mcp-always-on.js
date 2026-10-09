@@ -10,7 +10,8 @@
 
   const api = window.electronAPI;
   const KEY = "LOCAL_MCP_SERVER";
-  const MANAGED = ["Filesystem", "Terminal"];
+  let MANAGED = ["Filesystem", "Terminal"]; // refreshed from the main process: built-ins + enabled registry servers
+  const AUTO_MARK = "(local, always on)";
   const BUILTIN_DEFAULTS = ["Fetch", "Filesystem", "Sequential-Thinking"];
   const COMPLETIONS = "/api/v2/chat/completions";
 
@@ -30,6 +31,14 @@
   // Registers every enabled server with the main process (unchanged ones are not restarted),
   // refreshes tool lists, and returns the tool map of servers that are actually reachable now.
   async function syncServers() {
+    if (window.qwenExtras) {
+      try {
+        MANAGED = await within(window.qwenExtras.managed(), 1500);
+      } catch (_) {}
+      // A registry server that was turned off must disappear here too, or it would come back as a "user" server.
+      const keep = readServers().filter((s) => !(String(s.description || "").endsWith(AUTO_MARK) && !MANAGED.includes(s.name)));
+      localStorage.setItem(KEY, JSON.stringify(keep));
+    }
     const enabled = readServers().filter((s) => s.enabled && !MANAGED.includes(s.name));
     const extra = {};
     for (const s of enabled) extra[s.name] = { name: s.name, ...(s.params || {}), transportType: s.type };
@@ -49,7 +58,7 @@
         s = {
           id: crypto.randomUUID(),
           name,
-          description: `${name} (local, always on)`,
+          description: `${name} ${AUTO_MARK}`,
           type: "stdio",
           params: { command: "node", args: [] },
           default: BUILTIN_DEFAULTS.includes(name),
@@ -138,18 +147,33 @@
     return !!(r && r.success);
   }
 
+  // Hook events go to the main process, which decides what to do from hooks.json (notification, sound, command).
+  function emit(event, chatId, extra = {}) {
+    try {
+      const info = turnInfo[chatId] || {};
+      window.qwenExtras && window.qwenExtras.hook({
+        event,
+        chatId,
+        title: info.title || "",
+        durationMs: info.startedAt ? Date.now() - info.startedAt : 0,
+        toolsRan: info.toolsRan || 0,
+        ...extra,
+      });
+    } catch (_) {}
+  }
+
   function watchStream(res, chatId, opts = {}) {
     if (!res.body || !guard) return;
     const reader = res.clone().body.getReader();
     const dec = new TextDecoder();
+    const tracker = guard.createStreamTracker();
     let carry = "";
-    let buf = ""; // unparsed SSE remainder, only kept when the answer is wanted
-    let answer = "";
     (async () => {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = dec.decode(value, { stream: true });
+        tracker.push(chunk);
         const text = carry + chunk;
         const kind = guard.classifyCompletionError(text);
         if (kind) {
@@ -157,25 +181,19 @@
           const id = chatId || chatIdFromUrl();
           if (kind === "stuck") {
             const released = id ? await releaseChat(id).catch(() => false) : false;
+            if (released) emit("stuck_released", id);
             return showBanner(released ? "released" : "stuck", id);
           }
+          emit("turn_failed", id, { detail: kind === "context" ? "context limit" : "server error" });
           return onTurnFailed(id, kind === "context" ? "context" : "internal");
         }
         carry = text.slice(-300);
-        if (opts.collectAnswer) {
-          buf += chunk;
-          const lines = buf.split("\n");
-          buf = lines.pop();
-          for (const line of lines) {
-            if (!line.startsWith("data:")) continue;
-            try {
-              const d = JSON.parse(line.slice(5)).choices[0].delta;
-              if (d && d.phase === "answer" && typeof d.content === "string") answer += d.content;
-            } catch (_) {}
-          }
-        }
       }
-      if (opts.onDone) opts.onDone(answer);
+      const r = tracker.result();
+      // A stream that ends in a finished answer is the end of the whole task; one that ends in a tool
+      // call just means the app will run the tools and continue with a new request.
+      if (r.endedTurn && chatId) emit("turn_finished", chatId);
+      if (opts.onDone) opts.onDone(r.answer);
     })().catch(() => {});
   }
 
@@ -205,7 +223,11 @@
         if (userMsg) {
           const map = await syncServers().catch(() => ({}));
           changed = injectTools(body, map);
-          if (guard) turnInfo[chatId] = { toolsRan: 0, hop: guard.parseHop(String(userMsg.content || "")) };
+          if (guard) {
+            const text = String(userMsg.content || "");
+            turnInfo[chatId] = { toolsRan: 0, hop: guard.parseHop(text), startedAt: Date.now(), title: text.replace(/\s+/g, " ").slice(0, 60) };
+            emit("turn_started", chatId);
+          }
         } else if (msgs.some((m) => m && m.role === "function")) {
           infoFor(chatId).toolsRan++;
         }
@@ -218,6 +240,7 @@
             const hop = infoFor(chatId).hop;
             const auto = guard.shouldAutoCompact({ kind: "stop", hop });
             showBanner("stop", chatId, auto);
+            emit("budget_stop", chatId);
             if (auto) {
               const id = chatId;
               streamOpts = { collectAnswer: true, onDone: (summary) => autoCompact(id, summary, hop) };
@@ -320,6 +343,7 @@
       const j = await origFetch(`/api/v2/chats/${id}`).then((r) => r.json());
       const text = guard.buildHandover(j, { summary, hop: auto ? hop + 1 : 0 });
       const title = (j.data && j.data.title) || "previous chat";
+      if (auto) emit("auto_compact", id, { title, detail: `step ${hop + 1}/${guard.MAX_HOPS}` });
       sessionStorage.setItem(HANDOVER_KEY, JSON.stringify({ text, auto, from: { id, title }, hop: hop + 1 }));
       location.assign("/");
     } catch (e) {

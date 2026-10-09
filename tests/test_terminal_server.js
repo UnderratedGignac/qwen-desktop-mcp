@@ -80,6 +80,50 @@ const text = (r) => r.result.content.map((c) => c.text).join('');
     assert.match(text(r), /cmd-ok/);
   });
 
+  const call = (name, args) => rpc('tools/call', { name, arguments: args });
+  const parse = (r) => JSON.parse(text(r));
+
+  await check('background jobs: start returns immediately with an id', async () => {
+    const t0 = Date.now();
+    const r = await call('start_job', { command: "1..4 | ForEach-Object { Write-Output \"tick$_\"; Start-Sleep -Milliseconds 400 }" });
+    assert.ok(Date.now() - t0 < 1500, `start took ${Date.now() - t0}ms`);
+    const j = parse(r);
+    assert.match(j.job_id, /^job-\d+$/);
+    assert.strictEqual(j.status, 'running');
+    globalThis.__jobId = j.job_id;
+  });
+  await check('background jobs: job_output streams new output and reports completion', async () => {
+    const id = globalThis.__jobId;
+    let r = parse(await call('job_output', { job_id: id, wait_ms: 700 }));
+    assert.strictEqual(r.status, 'running');
+    assert.match(r.output, /tick1/);
+    r = parse(await call('job_output', { job_id: id, wait_ms: 5000, until_done: true }));
+    assert.strictEqual(r.status, 'finished');
+    assert.strictEqual(r.exit_code, 0);
+    assert.match(r.output, /tick4/);
+    assert.doesNotMatch(r.output, /tick1/, 'already-read output is not repeated');
+  });
+  await check('background jobs: a long job can be stopped and its process tree dies', async () => {
+    const j = parse(await call('start_job', { command: 'Start-Sleep -Seconds 60; Write-Output never' }));
+    const s = parse(await call('job_stop', { job_id: j.job_id }));
+    assert.strictEqual(s.status, 'stopped');
+    const r = parse(await call('job_output', { job_id: j.job_id }));
+    assert.strictEqual(r.status, 'stopped');
+  });
+  await check('background jobs: list_jobs shows jobs; unknown id is a clear error', async () => {
+    const l = parse(await call('list_jobs', {}));
+    assert.ok(l.jobs.length >= 2);
+    const r = await call('job_output', { job_id: 'job-999' });
+    assert.ok(r.result.isError);
+    assert.match(text(r), /unknown job/i);
+  });
+  await check('background jobs: a job outlives the default foreground timeout', async () => {
+    const j = parse(await call('start_job', { command: 'Start-Sleep -Seconds 3; Write-Output slow-done' }));
+    const r = parse(await call('job_output', { job_id: j.job_id, wait_ms: 8000, until_done: true }));
+    assert.strictEqual(r.status, 'finished');
+    assert.match(r.output, /slow-done/);
+  });
+
   for (const r of results) console.log(r.join(' | '));
   const failed = results.filter((r) => r[0] === 'FAIL').length;
   console.log(failed ? `${failed} FAILED` : 'ALL PASSED');

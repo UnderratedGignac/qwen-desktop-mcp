@@ -184,6 +184,51 @@ const handlers = {
     for (const it of items) if (re.test(it.rel)) found.push(path.join(abs, it.rel));
     return [{ type: 'text', text: found.slice(0, 100).join('\n') + (found.length > 100 ? `\n... and ${found.length - 100} more` : '') || 'No matches found' }];
   },
+  search_content: ({ path: p, pattern, glob, ignoreCase, context, maxResults }) => {
+    const abs = resolveIn(p);
+    let re;
+    try { re = new RegExp(pattern, ignoreCase ? 'i' : ''); } catch (e) { fail(`Invalid regex: ${e.message}`); }
+    const limit = Math.min(Math.max(Number(maxResults) || 100, 1), 1000);
+    const ctx = Math.min(Math.max(Number(context) || 0, 0), 5);
+    const globRe = glob ? globToRe(glob) : null;
+    const items = [];
+    walk(abs, '', items, [], 0);
+    const out = [];
+    let shown = 0;
+    let total = 0;
+    let filesWithMatches = 0;
+    for (const it of items) {
+      if (it.rel.endsWith('/') || (globRe && !globRe.test(it.rel))) continue;
+      let st, data;
+      try {
+        st = fs.statSync(it.dir);
+        if (st.size > 2 * 1048576) continue;
+        data = fs.readFileSync(it.dir);
+      } catch (_) { continue; }
+      if (data.subarray(0, 8000).includes(0)) continue; // binary
+      const lines = data.toString('utf8').split(/\r?\n/);
+      let fileHit = false;
+      let lastPrinted = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (!re.test(lines[i])) continue;
+        total++;
+        fileHit = true;
+        if (shown >= limit) continue;
+        shown++;
+        for (let k = Math.max(i - ctx, lastPrinted + 1); k <= Math.min(i + ctx, lines.length - 1); k++) {
+          out.push(`${it.rel}${k === i ? ':' : '-'}${k + 1}${k === i ? ':' : '-'} ${lines[k].slice(0, 300)}`);
+          lastPrinted = k;
+        }
+        if (ctx && shown < limit) { /* separator between groups handled by line numbers */ }
+      }
+      if (fileHit) filesWithMatches++;
+    }
+    if (!total) return [{ type: 'text', text: 'No matches found' }];
+    let text = out.join('\n');
+    if (total > shown) text += `\n... ${total - shown} more matches not shown (truncated at ${limit}); narrow the pattern or glob.`;
+    text += `\n[${total} matches in ${filesWithMatches} files]`;
+    return [{ type: 'text', text }];
+  },
   get_file_info: ({ path: p }) => {
     const abs = resolveIn(p);
     const st = fs.statSync(abs);
@@ -205,6 +250,26 @@ try {
   TOOLS = JSON.parse(fs.readFileSync(path.join(__dirname, 'filesystem_tools.json'), 'utf8'))
     .map(({ outputSchema, ...rest }) => rest);
 } catch (_) {}
+TOOLS.push({
+  name: 'search_content',
+  title: 'Search File Contents',
+  description:
+    'Search inside files for a regex (like grep -rn). Returns file:line: text. Skips node_modules, .git, dist, binaries and files over 2 MB. ' +
+    'Use this instead of reading whole files to find where something is defined or used.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Directory to search (must be inside an allowed directory).' },
+      pattern: { type: 'string', description: 'JavaScript regular expression.' },
+      glob: { type: 'string', description: 'Only search files whose relative path matches, e.g. **/*.ts' },
+      ignoreCase: { type: 'boolean' },
+      context: { type: 'number', description: 'Lines of context around each match (0-5).' },
+      maxResults: { type: 'number', description: 'Maximum matches to show (default 100, max 1000).' },
+    },
+    required: ['path', 'pattern'],
+  },
+  annotations: { readOnlyHint: true, openWorldHint: false },
+});
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
 

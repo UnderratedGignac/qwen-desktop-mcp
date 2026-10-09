@@ -140,6 +140,45 @@
     return null;
   }
 
+  // ---- stream tracker ----------------------------------------------------------------------
+  // Feed it the raw SSE text of one /chat/completions response. A response that ends in a finished
+  // "answer" phase ends the whole task; one that ends in a finished "local_tool" phase means the app
+  // runs the tools and sends the results back in a new request (the task continues).
+  function createStreamTracker() {
+    let buf = "";
+    const st = { answer: "", toolCalls: 0, lastFinish: null, error: null, sawAny: false };
+    const handle = (line) => {
+      if (!line.startsWith("data:")) return;
+      let d;
+      try { d = JSON.parse(line.slice(5)); } catch (_) { return; }
+      st.sawAny = true;
+      if (d.error) {
+        st.error = classifyCompletionError(JSON.stringify(d)) || "other";
+        return;
+      }
+      const delta = d.choices && d.choices[0] && d.choices[0].delta;
+      if (!delta) return;
+      if (delta.phase === "answer" && typeof delta.content === "string") st.answer += delta.content;
+      if (delta.status === "finished" && delta.phase) {
+        st.lastFinish = delta.phase;
+        const calls = delta.extra && delta.extra.local_mcp;
+        if (calls) for (const s of Object.keys(calls)) st.toolCalls += Array.isArray(calls[s]) ? calls[s].length : 0;
+      }
+    };
+    return {
+      push(chunk) {
+        buf += chunk;
+        const lines = buf.split("\n");
+        buf = lines.pop();
+        lines.forEach(handle);
+      },
+      result() {
+        if (buf) { handle(buf.trim()); buf = ""; }
+        return { endedTurn: !st.error && st.lastFinish === "answer", answer: st.answer, toolCalls: st.toolCalls, error: st.error };
+      },
+    };
+  }
+
   // ---- auto-compact ------------------------------------------------------------------------
   const MAX_HOPS = 3;
   const HOP_MARK = (hop, max) => `[auto-continue ${hop}/${max}]`;
@@ -255,6 +294,7 @@
     newState,
     guardRequest,
     classifyCompletionError,
+    createStreamTracker,
     parseHop,
     shouldAutoCompact,
     isBrokenChat,

@@ -3,8 +3,10 @@
   "private": true,
   "description": "Always-on, fast local MCP (Filesystem + Terminal) for the Qwen Desktop app on Windows",
   "scripts": {
-    "test": "node tests/test_profile.js && node tests/test_context_guard.js && node tests/test_terminal_server.js && node tests/test_fs_tools.js && node tests/test_mcp_manager.js src/main/mcp-manager.js node_modules",
-    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1"
+    "test": "node tests/test_profile.js && node tests/test_context_guard.js && node tests/test_hooks.js && node tests/test_registry.js && node tests/test_extras.js && node tests/test_skills_memory.js && node tests/test_terminal_server.js && node tests/test_fs_search.js && node tests/test_fs_tools.js && node tests/test_mcp_manager.js src/main/mcp-manager.js node_modules",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "doctor": "node scripts/doctor.js",
+    "mcp": "node scripts/qwen-mcp.js"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.13.1"

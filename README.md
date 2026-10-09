@@ -112,3 +112,52 @@ powershell -File scripts\qwen-accounts.ps1 -Remove               # remove shortc
 - Each window shows its account name in the title bar, and each account runs its own MCP servers.
 
 Using extra accounts to get around per-account usage limits may break Qwen's terms of service.
+
+## Daily-use features
+
+| Feature | What you get |
+| --- | --- |
+| **Background jobs** (Terminal) | `start_job` / `job_output` / `job_stop` / `list_jobs`: builds, installs and dev servers run without any tool timeout; Qwen polls for output. |
+| **`search_content`** (Filesystem) | Real grep (regex, glob, context lines, result cap) instead of Qwen improvising. |
+| **Memory** server | `remember` / `recall` / `forget`: notes that persist across chats (`~/.qwen-mcp/memory.json`). |
+| **Skills** server | `list_skills` / `load_skill` / `read_skill_file` over SKILL.md folders. Default folder `~/.qwen-mcp/skills` (clone of [qwen-skills](https://github.com/UnderratedGignac/qwen-skills)); more folders in `~/.qwen-mcp/skills.json`. |
+| **Hooks** | Run things when Qwen finishes, fails, hits its budget, auto-continues or releases a stuck chat. |
+| **Device registry** | Every MCP server found on this PC, switchable with one command. |
+| **Doctor** | `npm run doctor`: checks the install, the servers, the registry, skills and accounts. |
+
+### Hooks
+
+`%USERPROFILE%\.qwen-mcp\hooks.json` (created on first start). Events: `turn_started`, `turn_finished`,
+`turn_failed`, `budget_stop`, `auto_compact`, `stuck_released`. Defaults show a Windows notification and flash
+the taskbar when Qwen finishes or fails while its window is in the background.
+
+```json
+{
+  "hooks": {
+    "turn_finished": [
+      { "type": "notify", "always": true },
+      { "type": "command", "command": "powershell -File C:\scripts\qwen-done.ps1" }
+    ]
+  }
+}
+```
+
+Commands get `QWEN_EVENT`, `QWEN_CHAT_ID`, `QWEN_CHAT_TITLE`, `QWEN_DURATION_MS`, `QWEN_TOOLS_RAN`,
+`QWEN_DETAIL`, `QWEN_PROFILE` as environment variables and the same data as JSON on stdin. Chat text is never
+put in the command line. Only the events above are accepted from the chat page, and what runs comes only from
+this file.
+
+### MCP servers found on this PC
+
+```powershell
+npm run mcp -- discover              # scan config files and register every server found (nothing is enabled)
+npm run mcp -- list                  # name, state, risk, why
+npm run mcp -- enable playwright figma-ro
+npm run mcp -- disable playwright
+```
+
+The registry (`~/.qwen-mcp/servers.json`) only **points** at each server's definition in its original config
+file; API keys and tokens stay where they are and are never copied or printed. Everything starts **off**:
+a model on a remote server gets these tools with no approval prompt, and the risk labels (database access,
+account access, desktop control, your real browser) cannot tell what a local script does. Every enabled tool
+also adds roughly 250 tokens to every request. Changes apply to a running Qwen within a few seconds.

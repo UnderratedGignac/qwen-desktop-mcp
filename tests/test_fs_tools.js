@@ -25,7 +25,7 @@ function check(name, cond, detail) {
 (async () => {
   await p.setMCPServers({ FS: { name: 'FS', command: 'node', args: [path.join(__dirname, '..', 'servers', 'mcp_filesystem_server.js'), ROOT], transportType: 'stdio' } });
   const tools = await p.listTools({ serverName: 'FS' });
-  check('tools/list returns 14', tools.tools.length === 14, tools.tools.map(t => t.name).join(','));
+  check('tools/list returns 15 (14 official + search_content)', tools.tools.length === 15, tools.tools.map(t => t.name).join(','));
 
   let r = await call('list_allowed_directories', {});
   check('list_allowed_directories', r.content[0].text.includes(ROOT), r.content[0].text);

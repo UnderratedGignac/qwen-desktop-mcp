@@ -19,6 +19,6 @@ Remove-Item -Recurse -Force $Work
 
 $Servers = Join-Path $env:USERPROFILE ".qwen-mcp"
 New-Item -ItemType Directory -Force $Servers | Out-Null
-Copy-Item (Join-Path $Repo "servers\*") $Servers -Force
+Copy-Item (Join-Path $Repo "servers\*") $Servers -Recurse -Force
 Copy-Item (Join-Path $Repo "dist\app.asar") (Join-Path $Repo "installer\app.asar") -Force
 Write-Host "Built dist\app.asar and deployed servers to $Servers"

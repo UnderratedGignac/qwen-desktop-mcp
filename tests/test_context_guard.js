@@ -202,6 +202,43 @@ check('classifyCompletionError recognises internal_error', () => {
   assert.strictEqual(G.classifyCompletionError('{"error":{"code":"internal_error","details":"An unexpected error occurred."}}'), 'internal');
 });
 
+// ---- stream tracker (detects the end of a whole task from the SSE stream) --------------------
+const sse = (delta, extra = {}) => `data: ${JSON.stringify({ choices: [{ delta }], ...extra })}\n\n`;
+check('stream tracker: a tool-call stream is not the end of the turn', () => {
+  const t = G.createStreamTracker();
+  t.push(sse({ role: 'assistant', content: 'thinking', phase: 'think', status: 'typing' }));
+  t.push(sse({ content: 'Call Terminal-run_command', phase: 'local_tool', status: 'typing', mcp_name: 'Terminal', tool_name: 'run_command' }));
+  t.push(sse({ content: '', phase: 'local_tool', status: 'finished', extra: { local_mcp: { Terminal: [{ tool_name: 'run_command', params: {} }] } } }));
+  const r = t.result();
+  assert.strictEqual(r.endedTurn, false);
+  assert.strictEqual(r.toolCalls, 1);
+});
+check('stream tracker: a finished answer ends the turn and collects the text', () => {
+  const t = G.createStreamTracker();
+  t.push(sse({ content: 'Done', phase: 'answer', status: 'typing' }));
+  t.push(sse({ content: ' now.', phase: 'answer', status: 'typing' }));
+  t.push(sse({ content: '', phase: 'answer', status: 'finished' }));
+  const r = t.result();
+  assert.strictEqual(r.endedTurn, true);
+  assert.strictEqual(r.answer, 'Done now.');
+});
+check('stream tracker: chunks split mid-line and error payloads are handled', () => {
+  const t = G.createStreamTracker();
+  const whole = sse({ content: 'Hi', phase: 'answer', status: 'typing' }) + sse({ content: '', phase: 'answer', status: 'finished' });
+  for (let i = 0; i < whole.length; i += 7) t.push(whole.slice(i, i + 7));
+  assert.strictEqual(t.result().answer, 'Hi');
+  assert.strictEqual(t.result().endedTurn, true);
+  const e = G.createStreamTracker();
+  e.push('data: {"error":{"code":"internal_error","details":"x"}}\n\n');
+  assert.strictEqual(e.result().endedTurn, false);
+  assert.strictEqual(e.result().error, 'internal');
+});
+check('stream tracker: an unfinished stream (user pressed stop) is not a finished turn', () => {
+  const t = G.createStreamTracker();
+  t.push(sse({ content: 'partial', phase: 'answer', status: 'typing' }));
+  assert.strictEqual(t.result().endedTurn, false);
+});
+
 for (const r of results) console.log(r.join(' | '));
 const failed = results.filter((r) => r[0] === 'FAIL').length;
 console.log(failed ? `${failed} FAILED` : 'ALL PASSED');
